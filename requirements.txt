@@ -1,0 +1,4 @@
+# HTTP client for the backend's worker protocol (register/claim/logs/complete).
+httpx==0.28.1
+# Loads .env so local runs need no exported variables.
+python-dotenv==1.0.1
