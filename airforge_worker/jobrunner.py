@@ -186,7 +186,9 @@ def _terminate(proc: subprocess.Popen, grace: float) -> None:
             logger.error("Process %s ignored SIGKILL", proc.pid)
 
 
-def _job_env(run: dict[str, Any], payload_path: Path | None) -> dict[str, str]:
+def _job_env(
+    config: Config, run: dict[str, Any], payload_path: Path | None
+) -> dict[str, str]:
     """The subprocess environment: the worker's own env minus its secrets, plus
     run metadata pipeline code may want."""
     env = dict(os.environ)
@@ -203,6 +205,13 @@ def _job_env(run: dict[str, Any], payload_path: Path | None) -> dict[str, str]:
     )
     if payload_path is not None:
         env["AIRFORGE_PAYLOAD_PATH"] = str(payload_path)
+    # Data source access without baked-in credentials: the run-scoped token the
+    # backend minted into the claim, and where its /runtime API lives. The
+    # token authenticates only this run and expires with it — unlike the
+    # worker's own token, it is safe to hand to user code.
+    if run.get("runtime_token"):
+        env["AIRFORGE_RUN_TOKEN"] = str(run["runtime_token"])
+        env["AIRFORGE_API_URL"] = config.backend_url
     return env
 
 
@@ -267,7 +276,7 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
             proc = subprocess.Popen(
                 cmd,
                 cwd=workdir,
-                env=_job_env(run, payload_path),
+                env=_job_env(config, run, payload_path),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
