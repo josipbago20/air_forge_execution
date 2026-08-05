@@ -1,0 +1,51 @@
+# AirForge execution worker pool.
+#
+# Install: copy to /etc/systemd/system/airforge-worker.service, then
+#   systemctl daemon-reload && systemctl enable --now airforge-worker
+# See deploy/DEPLOY.md for the full walkthrough.
+
+[Unit]
+Description=AirForge execution worker pool
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=airforge
+Group=airforge
+WorkingDirectory=/opt/airforge/air_forge_execution
+EnvironmentFile=/etc/airforge/worker.env
+ExecStart=/opt/airforge/air_forge_execution/.venv/bin/python main.py
+Restart=always
+RestartSec=3
+
+# ── Graceful drain ──────────────────────────────────────────────────────────
+# On stop/redeploy the supervisor forwards SIGTERM to the workers, which finish
+# their current run before exiting. Set this >= your largest pipeline
+# timeout_seconds so a redeploy never SIGKILLs an in-flight run; systemd sends
+# SIGKILL only once this deadline passes.
+TimeoutStopSec=900
+KillSignal=SIGTERM
+
+# ── Orchestrator caps ───────────────────────────────────────────────────────
+# NOTE: job containers do NOT run under this cgroup — they run under the Docker
+# engine (bounded by airforge-jobs.slice + the per-run --memory/--cpus caps).
+# This only bounds the worker/supervisor process itself, which is light.
+MemoryMax=1G
+MemorySwapMax=0
+
+# State the worker manages: dependency layers and the uv wheel cache. systemd
+# creates /var/lib/airforge with the right ownership. Keep this in sync with
+# WORKER_DEPS_CACHE_DIR in worker.env.
+StateDirectory=airforge
+StateDirectoryMode=0750
+
+# Modest hardening of the orchestrator. NoNewPrivileges is intentionally NOT set
+# because the worker invokes the Docker CLI. The untrusted-code sandbox is the
+# job container, not this unit.
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

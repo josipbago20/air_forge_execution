@@ -21,6 +21,7 @@ import multiprocessing as mp
 import signal
 import time
 
+from airforge_worker import sandbox
 from airforge_worker.backend import BackendClient
 from airforge_worker.config import Config
 from airforge_worker.worker import worker_process_main
@@ -106,6 +107,19 @@ class Supervisor:
     # ── Main loop ─────────────────────────────────────────────────────────────
     def run(self) -> None:
         cfg = self._config
+
+        # Fail closed and fail loud: never fall back to running untrusted code
+        # on the bare host because the sandbox wasn't ready.
+        reason = sandbox.preflight(cfg)
+        if reason is not None:
+            logger.error("Sandbox preflight failed: %s", reason)
+            logger.error(
+                "Refusing to start. Fix the container runtime (see deploy/DEPLOY.md), "
+                "or set WORKER_SANDBOX=false for unsandboxed local development."
+            )
+            return
+        sandbox.cleanup_stale(cfg)
+
         initial = cfg.pool_size if not cfg.autoscale else max(cfg.min_workers, cfg.pool_size)
         logger.info(
             "Starting pool: %d worker(s)%s → %s",

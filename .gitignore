@@ -5,3 +5,6 @@ venv/
 .env
 .idea/
 .DS_Store
+# The filled-in copy of deploy/user-data.example.sh — carries the real worker
+# token, must never be committed.
+deploy/user-data.sh

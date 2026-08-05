@@ -32,6 +32,13 @@ API.
 - **Execution.** Manual/scheduled runs: `python -u <entrypoint>`. API
   invocations: a bootstrap imports the entrypoint and calls
   `handler(payload)`, and its return value goes back as the invocation result.
+- **Sandboxing.** Because playground pipelines are untrusted public code, each
+  run executes inside a **gVisor** container with a hard RAM/CPU/PID budget and
+  full internet egress; a `requirements.txt` in the bundle is installed once
+  into a cached, read-only dependency layer. The worker orchestrates — it never
+  runs user code in-process. See [`deploy/DEPLOY.md`](deploy/DEPLOY.md).
+  (`WORKER_SANDBOX=false` runs code directly, for local dev without a container
+  engine.)
 - **Observability.** stdout/stderr stream back in batches (the response also
   carries the cancel flag); heartbeats keep the worker visible on the
   dashboard. If a worker dies mid-run, the backend reaps the run as
@@ -45,10 +52,15 @@ API.
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env    # point BACKEND_URL + WORKER_API_TOKEN at your backend
 
-.venv/bin/python main.py                # fixed pool (WORKER_POOL_SIZE)
+WORKER_SANDBOX=false \
+.venv/bin/python main.py                # fixed pool (WORKER_POOL_SIZE), unsandboxed
 .venv/bin/python main.py --workers 4    # explicit fixed pool
 .venv/bin/python main.py --autoscale    # scale with queue depth
 ```
+
+> Local dev sets `WORKER_SANDBOX=false` (no container engine needed). Production
+> is sandboxed and runs on a DigitalOcean Droplet — see
+> [`deploy/DEPLOY.md`](deploy/DEPLOY.md) for the one-command install.
 
 ## Configuration (.env)
 
@@ -60,7 +72,15 @@ cp .env.example .env    # point BACKEND_URL + WORKER_API_TOKEN at your backend
 | `WORKER_AUTOSCALE` | `false` | Scale with queue depth instead. |
 | `WORKER_MIN_WORKERS` / `WORKER_MAX_WORKERS` | `1` / `8` | Autoscale bounds. |
 | `WORKER_SCALE_DOWN_IDLE_SECONDS` | `90` | Quiet time before retiring one worker. |
-| `WORKER_JOB_PYTHON` | this interpreter | Interpreter used for pipeline code. |
+| `WORKER_JOB_PYTHON` | this interpreter | Interpreter for pipeline code (unsandboxed mode only). |
+| `WORKER_SANDBOX` | `true` | Run each job in a gVisor container. Fail-closed. |
+| `WORKER_CONTAINER_RUNTIME` | `runsc` | Container runtime; gVisor in prod, `""` for the engine default. |
+| `WORKER_JOB_IMAGE` | `airforge/job-base:latest` | Image runs execute in (see `deploy/`). |
+| `WORKER_JOB_MEMORY` / `WORKER_JOB_CPUS` / `WORKER_JOB_PIDS_LIMIT` | `1g` / `1` / `256` | Per-run resource caps. |
+| `WORKER_CONTAINER_CGROUP_PARENT` | — | Slice bounding *all* runs' aggregate RAM/CPU. |
+| `WORKER_DEPS_CACHE_DIR` | `/var/lib/airforge/deps` | Cached `requirements.txt` layers, one per hash. |
+
+The full sandbox/deploy knobs live in [`deploy/worker.env.example`](deploy/worker.env.example).
 
 Autoscaling grows the pool immediately when queued work outnumbers hands
 (`running + queued`, clamped to the bounds) and shrinks it one worker at a

@@ -5,20 +5,29 @@ file). It is materialised into a fresh temp directory, so multi-file pipelines
 work exactly like a local project: ``main.py`` can ``import helpers`` from the
 file next to it.
 
+By default the run executes **sandboxed**: a gVisor container with a hard
+memory / CPU / PID budget, the code at ``/work`` and (when the bundle declares a
+``requirements.txt``) a cached dependency layer at ``/deps``. See
+:mod:`airforge_worker.sandbox`. Setting ``WORKER_SANDBOX=false`` runs the code
+directly with the worker's interpreter instead — for local development on a box
+without a container engine.
+
 Two execution shapes, chosen by the run's *trigger*:
 
-* ``manual`` / ``schedule`` — run the entrypoint as a script
-  (``python -u main.py``). If the run carries a payload it is written next to
-  the code as ``payload.json`` and pointed at via ``AIRFORGE_PAYLOAD_PATH``.
-* ``api`` — a tiny bootstrap imports the entrypoint, calls
-  ``handler(payload)``, and writes the return value to a result file, which is
-  reported back as the invocation's response.
+* ``manual`` / ``schedule`` — run the entrypoint as a script (``python -u
+  main.py``). If the run carries a payload it is written next to the code as
+  ``payload.json`` and pointed at via ``AIRFORGE_PAYLOAD_PATH``.
+* ``api`` — a tiny bootstrap imports the entrypoint, calls ``handler(payload)``,
+  and writes the return value to a result file, which is reported back as the
+  invocation's response.
 
-Output is streamed: reader threads capture stdout/stderr line by line, and the
-main thread ships batches to the backend on a short interval. The log-append
-response doubles as the control channel — it says whether the user asked the
-run to stop — and a run that prints nothing is still covered by a periodic
-control poll. Timeouts are enforced here with SIGTERM, then SIGKILL.
+Output is streamed: reader threads capture stdout/stderr line by line (whether
+the process is the code itself or ``docker run`` relaying the container's
+output), and the main thread ships batches to the backend on a short interval.
+The log-append response doubles as the control channel — it says whether the
+user asked the run to stop — and a run that prints nothing is still covered by a
+periodic control poll. Timeouts stop the run (the container, or the process)
+with SIGTERM, then SIGKILL.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from airforge_worker import sandbox
 from airforge_worker.backend import BackendClient
 from airforge_worker.config import Config
 
@@ -74,6 +84,10 @@ result = handler(payload)
 with open(result_path, "w") as f:
     json.dump(result, f, default=str)
 """
+
+_API_RUNNER_NAME = "_airforge_api_runner.py"
+_RESULT_NAME = "_airforge_result.json"
+_PAYLOAD_NAME = "payload.json"
 
 
 def _utcnow_iso() -> str:
@@ -173,6 +187,8 @@ class _LogPump:
 
 
 def _terminate(proc: subprocess.Popen, grace: float) -> None:
+    """Stop a *direct* (unsandboxed) subprocess. Sandboxed runs are stopped via
+    :func:`sandbox.stop_container` instead."""
     if proc.poll() is not None:
         return
     proc.terminate()
@@ -187,10 +203,11 @@ def _terminate(proc: subprocess.Popen, grace: float) -> None:
 
 
 def _job_env(
-    config: Config, run: dict[str, Any], payload_path: Path | None
+    config: Config, run: dict[str, Any], payload_path: Path
 ) -> dict[str, str]:
-    """The subprocess environment: the worker's own env minus its secrets, plus
-    run metadata pipeline code may want."""
+    """Environment for a *direct* run: the worker's own env minus its secrets,
+    plus run metadata. (Sandboxed runs get an explicit env — see
+    :func:`_container_env` — so the host environment never enters the box.)"""
     env = dict(os.environ)
     env.pop("WORKER_API_TOKEN", None)
     env.update(
@@ -201,17 +218,37 @@ def _job_env(
             "AIRFORGE_PIPELINE_ID": str(run["pipeline_id"]),
             "AIRFORGE_PIPELINE_NAME": str(run["pipeline_name"]),
             "AIRFORGE_TRIGGER": str(run["trigger"]),
+            "AIRFORGE_PAYLOAD_PATH": str(payload_path),
         }
     )
-    if payload_path is not None:
-        env["AIRFORGE_PAYLOAD_PATH"] = str(payload_path)
-    # Data source access without baked-in credentials: the run-scoped token the
-    # backend minted into the claim, and where its /runtime API lives. The
-    # token authenticates only this run and expires with it — unlike the
-    # worker's own token, it is safe to hand to user code.
     if run.get("runtime_token"):
         env["AIRFORGE_RUN_TOKEN"] = str(run["runtime_token"])
         env["AIRFORGE_API_URL"] = config.backend_url
+    return env
+
+
+def _container_env(config: Config, run: dict[str, Any], deps_site: Path | None) -> dict[str, str]:
+    """Environment for a *sandboxed* run — built from scratch, so nothing from
+    the worker's host environment (least of all its token) leaks into untrusted
+    code. Paths are container paths (``/work``, ``/deps``)."""
+    env = {
+        "PYTHONUNBUFFERED": "1",
+        "AIRFORGE_RUN_ID": str(run["run_id"]),
+        "AIRFORGE_RUN_NUMBER": str(run["run_number"]),
+        "AIRFORGE_PIPELINE_ID": str(run["pipeline_id"]),
+        "AIRFORGE_PIPELINE_NAME": str(run["pipeline_name"]),
+        "AIRFORGE_TRIGGER": str(run["trigger"]),
+        "AIRFORGE_PAYLOAD_PATH": f"/work/{_PAYLOAD_NAME}",
+    }
+    # Data-source access without baked-in credentials: the run-scoped token the
+    # backend minted into the claim, and where its /runtime API lives. The token
+    # authenticates only this run and expires with it. AIRFORGE_API_URL must be
+    # reachable from inside the container — see deploy/DEPLOY.md.
+    if run.get("runtime_token"):
+        env["AIRFORGE_RUN_TOKEN"] = str(run["runtime_token"])
+        env["AIRFORGE_API_URL"] = config.backend_url
+    if deps_site is not None:
+        env["PYTHONPATH"] = "/deps"
     return env
 
 
@@ -230,10 +267,12 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
     exit_code: int | None = None
     error: str | None = None
     result: Any = None
+    proc: subprocess.Popen | None = None
 
     try:
         with tempfile.TemporaryDirectory(prefix="airforge-run-") as tmp:
             workdir = Path(tmp)
+            pump = _LogPump(client, config, run_id)
 
             # ── Materialise the bundle ────────────────────────────────────────
             for f in run["files"]:
@@ -242,46 +281,76 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(base64.b64decode(f["content_b64"]))
 
-            entrypoint = workdir / _safe_rel_path(run["entrypoint"])
-            if not entrypoint.is_file():
+            entry_rel = _safe_rel_path(run["entrypoint"])
+            if not (workdir / entry_rel).is_file():
                 raise FileNotFoundError(
                     f"entrypoint {run['entrypoint']!r} is not in the pipeline folder"
                 )
 
-            payload_path = workdir / "payload.json"
+            payload_path = workdir / _PAYLOAD_NAME
             payload_path.write_text(json.dumps(run.get("payload")))
 
-            # ── Build the command ─────────────────────────────────────────────
-            if run["trigger"] == "api":
-                runner = workdir / "_airforge_api_runner.py"
-                runner.write_text(_API_RUNNER)
-                result_path = workdir / "_airforge_result.json"
-                cmd = [
-                    config.job_python,
-                    "-u",
-                    str(runner),
-                    str(entrypoint),
-                    str(payload_path),
-                    str(result_path),
-                ]
+            is_api = run["trigger"] == "api"
+            result_path = workdir / _RESULT_NAME if is_api else None
+            if is_api:
+                (workdir / _API_RUNNER_NAME).write_text(_API_RUNNER)
+
+            # ── Dependencies (sandboxed runs) ─────────────────────────────────
+            # Build/reuse the cached layer before we start the run's clock.
+            deps_site: Path | None = None
+            if config.sandbox:
+                try:
+                    deps_site = sandbox.resolve_deps(config, workdir, pump.system_line)
+                except Exception as exc:  # noqa: BLE001
+                    pump.flush_all()
+                    raise RuntimeError(f"Dependency install failed: {exc}") from exc
+
+            # ── Build the command and its stop() ──────────────────────────────
+            if config.sandbox:
+                name = sandbox.container_name(run_id)
+                if is_api:
+                    inside = ["python", "-u", _API_RUNNER_NAME, entry_rel.as_posix(),
+                              _PAYLOAD_NAME, _RESULT_NAME]
+                else:
+                    inside = ["python", "-u", entry_rel.as_posix()]
+                argv = sandbox.run_argv(
+                    config,
+                    name=name,
+                    workdir=workdir,
+                    deps_site=deps_site,
+                    inside_cmd=inside,
+                    job_env=_container_env(config, run, deps_site),
+                )
+                popen_kwargs: dict[str, Any] = dict(
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
+                )
+
+                def stop(grace: float) -> None:
+                    sandbox.stop_container(config, name, grace)
             else:
-                result_path = None
-                cmd = [config.job_python, "-u", str(entrypoint)]
+                entrypoint = workdir / entry_rel
+                if is_api:
+                    argv = [config.job_python, "-u", str(workdir / _API_RUNNER_NAME),
+                            str(entrypoint), str(payload_path), str(result_path)]
+                else:
+                    argv = [config.job_python, "-u", str(entrypoint)]
+                popen_kwargs = dict(
+                    cwd=workdir,
+                    env=_job_env(config, run, payload_path),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+
+                def stop(grace: float) -> None:
+                    if proc is not None:
+                        _terminate(proc, grace)
 
             # ── Run it ────────────────────────────────────────────────────────
-            pump = _LogPump(client, config, run_id)
             started = time.monotonic()
             timeout = float(run["timeout_seconds"])
-
-            proc = subprocess.Popen(
-                cmd,
-                cwd=workdir,
-                env=_job_env(config, run, payload_path),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+            proc = subprocess.Popen(argv, **popen_kwargs)
             readers = pump.attach(proc)
 
             timed_out = False
@@ -289,14 +358,14 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
                 pump.pump_once()
                 if pump.cancel_requested:
                     pump.system_line("[cancel requested — stopping the run]")
-                    _terminate(proc, config.kill_grace_seconds)
+                    stop(config.kill_grace_seconds)
                     break
                 if time.monotonic() - started > timeout:
                     timed_out = True
                     pump.system_line(
                         f"[timed out after {int(timeout)}s — stopping the run]"
                     )
-                    _terminate(proc, config.kill_grace_seconds)
+                    stop(config.kill_grace_seconds)
                     break
                 time.sleep(config.log_flush_interval_seconds)
 
@@ -329,6 +398,11 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
                         status, error = "failed", f"handler() result is not valid JSON: {exc}"
             else:
                 status, error = "failed", f"Exited with code {exit_code}"
+                if exit_code == 137:
+                    # SIGKILL, and not by our own timeout/cancel paths (handled
+                    # above) — in the sandbox that is almost always the cgroup
+                    # OOM killer enforcing the run's memory cap.
+                    error += " (killed — likely exceeded the run's memory limit)"
 
     except Exception as exc:  # noqa: BLE001 - report, never crash the worker
         logger.exception("Run %s blew up in the worker", run_id)

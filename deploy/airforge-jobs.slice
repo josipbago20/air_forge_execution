@@ -1,0 +1,28 @@
+# Aggregate resource ceiling for ALL sandboxed job + build containers combined.
+#
+# The per-run caps (WORKER_JOB_MEMORY / WORKER_JOB_CPUS) bound a single run; this
+# slice bounds the sum of every run at once, so the pool can never exceed the
+# box no matter how many workers are busy. The worker places its containers here
+# via WORKER_CONTAINER_CGROUP_PARENT=airforge-jobs.slice.
+#
+# Sized for a 2 GB / 1 vCPU droplet running up to 3 workers × 512 MB
+# (3 × 512m = 1536M ≤ 1600M), and 90% of the single core so the host (Docker,
+# the worker orchestrator, sshd) always keeps a sliver of CPU. Jobs get no
+# swap (deterministic per-run OOM); the host itself should have a swapfile —
+# deploy/user-data.example.sh creates one.
+#
+# Scaling up (keep MemoryMax ≈ workers × WORKER_JOB_MEMORY, leaving the host
+# ~700 MB + ~10% CPU):
+#   8 GB / 4 vCPU:  MemoryMax=6G   CPUQuota=350%   (e.g. 6 × 1g runs)
+#
+# Install: copy to /etc/systemd/system/airforge-jobs.slice, then
+#   systemctl daemon-reload && systemctl start airforge-jobs.slice
+
+[Unit]
+Description=AirForge sandboxed job containers (aggregate resource ceiling)
+Before=slices.target
+
+[Slice]
+MemoryMax=1600M
+MemorySwapMax=0
+CPUQuota=90%
