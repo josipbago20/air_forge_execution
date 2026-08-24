@@ -23,7 +23,8 @@ RUN uv pip install --system --no-cache \
         numpy \
         pandas \
         python-dateutil \
-        scikit-learn
+        scikit-learn \
+        clickhouse-connect
 
 # The worker supplies the exact command and --user per run; no entrypoint here.
 CMD ["python3"]
