@@ -34,7 +34,17 @@ class BackendClient:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     def register(self, name: str, meta: dict[str, Any]) -> dict[str, Any]:
-        resp = self._http.post("/register", json={"name": name, "meta": meta})
+        # queue_id names the one queue this process drains (WORKER_QUEUE_ID);
+        # null joins the shared Playground pool serving every project's
+        # system queue.
+        resp = self._http.post(
+            "/register",
+            json={
+                "name": name,
+                "meta": meta,
+                "queue_id": self._config.queue_id or None,
+            },
+        )
         resp.raise_for_status()
         return resp.json()
 

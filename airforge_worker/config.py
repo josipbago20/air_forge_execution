@@ -45,6 +45,11 @@ class Config:
     backend_url: str = "http://127.0.0.1:8001"
     # Shared secret; must match the backend's WORKER_API_TOKEN.
     worker_token: str = "dev-worker-token-change-me-4b8a17c2"
+    # The one AirForge queue this fleet drains (a dedicated deployment for a
+    # single project queue). Empty — the default, and what the shared fleet
+    # runs with — joins the Playground pool, which serves every project's
+    # system queue.
+    queue_id: str = ""
 
     # ── Pool sizing ───────────────────────────────────────────────────────────
     # Fixed pool size when autoscale is off; the floor when it is on.
@@ -117,6 +122,7 @@ def load_config() -> Config:
     return Config(
         backend_url=os.environ.get("BACKEND_URL", Config.backend_url).rstrip("/"),
         worker_token=os.environ.get("WORKER_API_TOKEN", Config.worker_token),
+        queue_id=os.environ.get("WORKER_QUEUE_ID", Config.queue_id).strip(),
         pool_size=_int("WORKER_POOL_SIZE", Config.pool_size),
         autoscale=_bool("WORKER_AUTOSCALE", Config.autoscale),
         min_workers=_int("WORKER_MIN_WORKERS", Config.min_workers),
