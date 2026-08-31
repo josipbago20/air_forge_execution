@@ -14,7 +14,8 @@ without a container engine.
 
 Two execution shapes, chosen by the run's *trigger*:
 
-* ``manual`` / ``schedule`` — run the entrypoint as a script (``python -u
+* ``manual`` / ``schedule`` / ``pipeline`` (a chained run, enqueued because an
+  upstream pipeline succeeded) — run the entrypoint as a script (``python -u
   main.py``). If the run carries a payload it is written next to the code as
   ``payload.json`` and pointed at via ``AIRFORGE_PAYLOAD_PATH``.
 * ``api`` — a tiny bootstrap imports the entrypoint, calls ``handler(payload)``,
