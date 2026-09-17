@@ -74,6 +74,17 @@ class Config:
     # Grace between SIGTERM and SIGKILL when stopping a run.
     kill_grace_seconds: float = 5.0
 
+    # ── Resource metrics (sandboxed runs) ──────────────────────────────────────
+    # Sample the run container's cgroup (memory, CPU, block I/O) while it runs:
+    # the timeline rides along with log batches, a summary with completion, and
+    # one "[resources]" line lands in the run log. See metrics.py.
+    metrics_enabled: bool = True
+    metrics_sample_interval_seconds: float = 0.5
+    # Minimum gap between samples; the run loop ticks every 0.7 s (the log
+    # flush interval), so that is the effective cadence at the default.
+    # Soft cap per run; past it the sampling interval stretches.
+    metrics_max_samples: int = 3600
+
     # ── Sandboxing (untrusted user code) ───────────────────────────────────────
     # Runs execute inside a gVisor-isolated container by default: fail closed so
     # a misconfigured deploy never runs public code on the bare host. Local dev
@@ -140,6 +151,11 @@ def load_config() -> Config:
         log_batch_max=_int("WORKER_LOG_BATCH_MAX", Config.log_batch_max),
         control_poll_seconds=_float("WORKER_CONTROL_POLL_SECONDS", Config.control_poll_seconds),
         kill_grace_seconds=_float("WORKER_KILL_GRACE_SECONDS", Config.kill_grace_seconds),
+        metrics_enabled=_bool("WORKER_METRICS", Config.metrics_enabled),
+        metrics_sample_interval_seconds=_float(
+            "WORKER_METRICS_SAMPLE_INTERVAL_SECONDS", Config.metrics_sample_interval_seconds
+        ),
+        metrics_max_samples=_int("WORKER_METRICS_MAX_SAMPLES", Config.metrics_max_samples),
         sandbox=_bool("WORKER_SANDBOX", Config.sandbox),
         container_cmd=os.environ.get("WORKER_CONTAINER_CMD", Config.container_cmd),
         container_runtime=os.environ.get(

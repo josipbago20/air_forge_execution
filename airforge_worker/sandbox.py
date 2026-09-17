@@ -215,11 +215,16 @@ def run_argv(
     deps_site: Optional[Path],
     inside_cmd: list[str],
     job_env: dict[str, str],
+    cidfile: Optional[Path] = None,
 ) -> list[str]:
     """The ``docker run`` command line for one sandboxed run: gVisor runtime,
     hard resource caps, a read-only root with only /work writable, the code and
     (optional) deps bind-mounted, and an explicit env — the host's own
-    environment (and its worker token) never enters the container."""
+    environment (and its worker token) never enters the container.
+
+    ``cidfile`` makes Docker write the container's full id there at create
+    time; the metrics sampler uses it to find the run's cgroup without a
+    ``docker inspect`` round-trip."""
     argv = [
         config.container_cmd,
         "run",
@@ -253,6 +258,8 @@ def run_argv(
         "-w",
         _WORK_MOUNT,
     ]
+    if cidfile is not None:
+        argv += ["--cidfile", str(cidfile)]
     if deps_site is not None:
         argv += ["-v", f"{deps_site}:{_DEPS_MOUNT}:ro"]
     for key, value in job_env.items():

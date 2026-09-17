@@ -67,9 +67,18 @@ class BackendClient:
         resp.raise_for_status()
         return resp.json()
 
-    def append_logs(self, run_id: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
-        """Ship a batch of lines; the response carries the cancel flag."""
-        resp = self._http.post(f"/runs/{run_id}/logs", json={"entries": entries})
+    def append_logs(
+        self,
+        run_id: str,
+        entries: list[dict[str, Any]],
+        samples: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Ship a batch of lines (and any resource samples taken since the last
+        batch); the response carries the cancel flag."""
+        body: dict[str, Any] = {"entries": entries}
+        if samples:
+            body["samples"] = samples
+        resp = self._http.post(f"/runs/{run_id}/logs", json=body)
         resp.raise_for_status()
         return resp.json()
 
@@ -86,16 +95,18 @@ class BackendClient:
         exit_code: int | None,
         error: str | None,
         result: Any,
+        metrics: dict[str, Any] | None = None,
     ) -> None:
-        resp = self._http.post(
-            f"/runs/{run_id}/complete",
-            json={
-                "status": status,
-                "exit_code": exit_code,
-                "error": error,
-                "result": result,
-            },
-        )
+        body: dict[str, Any] = {
+            "status": status,
+            "exit_code": exit_code,
+            "error": error,
+            "result": result,
+        }
+        if metrics is not None:
+            # Per-run resource summary (see metrics.py). Optional on the wire.
+            body["metrics"] = metrics
+        resp = self._http.post(f"/runs/{run_id}/complete", json=body)
         resp.raise_for_status()
 
     def queue_stats(self) -> dict[str, Any]:

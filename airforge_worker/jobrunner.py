@@ -29,6 +29,11 @@ The log-append response doubles as the control channel — it says whether the
 user asked the run to stop — and a run that prints nothing is still covered by a
 periodic control poll. Timeouts stop the run (the container, or the process)
 with SIGTERM, then SIGKILL.
+
+Sandboxed runs are also *measured*: the main thread samples the container's
+cgroup (memory, CPU, block I/O) each tick — see :mod:`airforge_worker.metrics`
+— ships the samples with the log batches, and reports a summary with the
+completion, plus one ``[resources]`` line in the run log.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ from typing import Any
 from airforge_worker import sandbox
 from airforge_worker.backend import BackendClient
 from airforge_worker.config import Config
+from airforge_worker.metrics import RunMetrics, describe as describe_metrics, fmt_bytes
 
 logger = logging.getLogger("airforge.jobrunner")
 
@@ -107,10 +113,17 @@ def _safe_rel_path(path: str) -> Path:
 class _LogPump:
     """Collects subprocess output and ships it to the backend in batches."""
 
-    def __init__(self, client: BackendClient, config: Config, run_id: str) -> None:
+    def __init__(
+        self,
+        client: BackendClient,
+        config: Config,
+        run_id: str,
+        metrics: RunMetrics | None = None,
+    ) -> None:
         self._client = client
         self._config = config
         self._run_id = run_id
+        self._metrics = metrics
         self._queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.cancel_requested = False
         self._last_contact = 0.0
@@ -149,40 +162,54 @@ class _LogPump:
             out.append({"stream": stream, "line": line, "ts": _utcnow_iso()})
         return out
 
+    def _take_samples(self) -> list[dict[str, Any]]:
+        return self._metrics.take_pending() if self._metrics is not None else []
+
     def pump_once(self, *, force_control: bool = False) -> None:
         """Ship one batch if there is output; otherwise poll control if it has
-        been quiet long enough. Network hiccups are logged and survived — the
-        run must not die because a log batch didn't land."""
+        been quiet long enough. Resource samples taken since the last contact
+        ride along with whichever request goes out — a log POST (even with no
+        lines) stands in for the control GET when there are samples to ship.
+        Network hiccups are logged and survived — the run must not die because
+        a batch didn't land."""
         batch = self._drain()
         now = time.monotonic()
+        control_due = (
+            force_control
+            or now - self._last_contact >= self._config.control_poll_seconds
+        )
+        if not batch and not control_due:
+            return
+        samples = self._take_samples()
         try:
-            if batch:
-                control = self._client.append_logs(self._run_id, batch)
-                self._last_contact = now
-            elif force_control or now - self._last_contact >= self._config.control_poll_seconds:
-                control = self._client.run_control(self._run_id)
-                self._last_contact = now
+            if batch or samples:
+                control = self._client.append_logs(self._run_id, batch, samples=samples)
             else:
-                return
+                control = self._client.run_control(self._run_id)
+            self._last_contact = now
             if control.get("cancel_requested"):
                 self.cancel_requested = True
         except Exception as exc:  # noqa: BLE001 - keep the run alive
             logger.warning("Log/control call failed for run %s: %s", self._run_id, exc)
 
     def flush_all(self) -> None:
-        """Final drain after the process exited: everything must go, batch by
-        batch, with a couple of retries per batch."""
+        """Final drain after the process exited: every line and every remaining
+        sample must go, batch by batch, with a couple of retries per batch."""
         while True:
             batch = self._drain()
-            if not batch:
+            samples = self._take_samples()
+            if not batch and not samples:
                 break
             for attempt in range(3):
                 try:
-                    self._client.append_logs(self._run_id, batch)
+                    self._client.append_logs(self._run_id, batch, samples=samples)
                     break
                 except Exception:  # noqa: BLE001
                     if attempt == 2:
-                        logger.error("Dropped %d log line(s) for run %s", len(batch), self._run_id)
+                        logger.error(
+                            "Dropped %d log line(s) and %d sample(s) for run %s",
+                            len(batch), len(samples), self._run_id,
+                        )
                     else:
                         time.sleep(1.5 * (attempt + 1))
 
@@ -253,6 +280,40 @@ def _container_env(config: Config, run: dict[str, Any], deps_site: Path | None) 
     return env
 
 
+def _dir_size(path: Path) -> int | None:
+    """Bytes on disk under the run directory — the only real disk a sandboxed
+    run has (its /tmp is a tmpfs, which the cgroup counts as memory)."""
+    try:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    except OSError:
+        return None
+
+
+def _sigkill_hint(metrics: RunMetrics | None) -> str:
+    """Why a SIGKILL (exit 137) most likely happened. The kernel's own oom_kill
+    counter is definitive when a sample caught it; otherwise peak-against-limit
+    is the tell. Without measurements, the historical guess stands."""
+    if metrics is not None and metrics.source == "cgroup":
+        limit = metrics.memory_limit_bytes
+        peak = metrics.memory_peak_bytes
+        if metrics.oom_kills:
+            if limit:
+                return f" (killed — exceeded the run's memory limit of {fmt_bytes(limit)})"
+            return " (killed — exceeded the run's memory limit)"
+        ratio = metrics.memory_ratio()
+        if ratio is not None and peak is not None and limit:
+            if ratio >= 0.9:
+                return (
+                    f" (killed — likely exceeded the run's memory limit; "
+                    f"peak {fmt_bytes(peak)} of {fmt_bytes(limit)})"
+                )
+            return (
+                f" (killed; peak memory was {fmt_bytes(peak)} of {fmt_bytes(limit)}, "
+                f"so probably not the memory limit)"
+            )
+    return " (killed — likely exceeded the run's memory limit)"
+
+
 def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> None:
     """Materialise, execute, stream, and complete one claimed run."""
     run_id = str(run["run_id"])
@@ -269,11 +330,27 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
     error: str | None = None
     result: Any = None
     proc: subprocess.Popen | None = None
+    metrics: RunMetrics | None = None
+    metrics_summary: dict[str, Any] | None = None
+    cidfile: Path | None = None
 
     try:
         with tempfile.TemporaryDirectory(prefix="airforge-run-") as tmp:
             workdir = Path(tmp)
-            pump = _LogPump(client, config, run_id)
+            if config.sandbox and config.metrics_enabled:
+                # Docker writes the container id here at create time. A sibling
+                # of the run directory, so user code (which sees /work) can
+                # neither read nor clobber it.
+                cidfile = Path(f"{tmp}.cid")
+                metrics = RunMetrics(
+                    cidfile=cidfile,
+                    cgroup_parent=config.container_cgroup_parent,
+                    memory_limit=config.job_memory,
+                    cpu_limit=config.job_cpus,
+                    base_interval=config.metrics_sample_interval_seconds,
+                    max_samples=config.metrics_max_samples,
+                )
+            pump = _LogPump(client, config, run_id, metrics)
 
             # ── Materialise the bundle ────────────────────────────────────────
             for f in run["files"]:
@@ -321,6 +398,7 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
                     deps_site=deps_site,
                     inside_cmd=inside,
                     job_env=_container_env(config, run, deps_site),
+                    cidfile=cidfile,
                 )
                 popen_kwargs: dict[str, Any] = dict(
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
@@ -351,11 +429,15 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
             # ── Run it ────────────────────────────────────────────────────────
             started = time.monotonic()
             timeout = float(run["timeout_seconds"])
+            if metrics is not None:
+                metrics.start()
             proc = subprocess.Popen(argv, **popen_kwargs)
             readers = pump.attach(proc)
 
             timed_out = False
             while proc.poll() is None:
+                if metrics is not None:
+                    metrics.sample()
                 pump.pump_once()
                 if pump.cancel_requested:
                     pump.system_line("[cancel requested — stopping the run]")
@@ -371,8 +453,18 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
                 time.sleep(config.log_flush_interval_seconds)
 
             exit_code = proc.wait()
+            wall_seconds = time.monotonic() - started
+            if metrics is not None:
+                # Usually too late — the cgroup goes with the container — but
+                # free when it isn't.
+                metrics.sample(force=True)
             for t in readers:
                 t.join(timeout=5)
+            if metrics is not None:
+                metrics_summary = metrics.summary(
+                    wall_seconds=wall_seconds, workdir_bytes=_dir_size(workdir)
+                )
+                pump.system_line(describe_metrics(metrics_summary))
             pump.flush_all()
 
             # ── Decide the outcome ────────────────────────────────────────────
@@ -402,12 +494,19 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
                 if exit_code == 137:
                     # SIGKILL, and not by our own timeout/cancel paths (handled
                     # above) — in the sandbox that is almost always the cgroup
-                    # OOM killer enforcing the run's memory cap.
-                    error += " (killed — likely exceeded the run's memory limit)"
+                    # OOM killer enforcing the run's memory cap; the metrics
+                    # say whether it really was.
+                    error += _sigkill_hint(metrics)
 
     except Exception as exc:  # noqa: BLE001 - report, never crash the worker
         logger.exception("Run %s blew up in the worker", run_id)
         status, error = "failed", f"Worker error: {exc}"
+    finally:
+        if cidfile is not None:
+            try:
+                cidfile.unlink()
+            except OSError:
+                pass
 
     # ── Report, insistently ───────────────────────────────────────────────────
     # Losing the completion would leave the run RUNNING until the reaper calls
@@ -415,7 +514,12 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
     for attempt in range(5):
         try:
             client.complete(
-                run_id, status=status, exit_code=exit_code, error=error, result=result
+                run_id,
+                status=status,
+                exit_code=exit_code,
+                error=error,
+                result=result,
+                metrics=metrics_summary,
             )
             break
         except Exception as exc:  # noqa: BLE001
