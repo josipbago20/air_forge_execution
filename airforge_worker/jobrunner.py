@@ -461,10 +461,16 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
             for t in readers:
                 t.join(timeout=5)
             if metrics is not None:
-                metrics_summary = metrics.summary(
-                    wall_seconds=wall_seconds, workdir_bytes=_dir_size(workdir)
-                )
-                pump.system_line(describe_metrics(metrics_summary))
+                # Reporting must never decide the run's fate: a bug here is
+                # logged, and the run's real outcome still goes out below.
+                try:
+                    metrics_summary = metrics.summary(
+                        wall_seconds=wall_seconds, workdir_bytes=_dir_size(workdir)
+                    )
+                    pump.system_line(describe_metrics(metrics_summary))
+                except Exception:  # noqa: BLE001
+                    logger.exception("Could not summarise resource metrics for run %s", run_id)
+                    metrics_summary = None
             pump.flush_all()
 
             # ── Decide the outcome ────────────────────────────────────────────
@@ -496,7 +502,10 @@ def execute_run(client: BackendClient, config: Config, run: dict[str, Any]) -> N
                     # above) — in the sandbox that is almost always the cgroup
                     # OOM killer enforcing the run's memory cap; the metrics
                     # say whether it really was.
-                    error += _sigkill_hint(metrics)
+                    try:
+                        error += _sigkill_hint(metrics)
+                    except Exception:  # noqa: BLE001 - never lose the outcome over a hint
+                        error += " (killed — likely exceeded the run's memory limit)"
 
     except Exception as exc:  # noqa: BLE001 - report, never crash the worker
         logger.exception("Run %s blew up in the worker", run_id)
