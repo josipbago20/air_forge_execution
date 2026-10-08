@@ -153,8 +153,9 @@ rides along in the claim bundle automatically (no backend change).
 - **uv's shared wheel cache** (`/var/lib/airforge/uv-cache`) makes even a new
   hash cheap when it overlaps existing layers.
 - The base image **pre-bakes** a modest common stack (`requests`, `httpx`,
-  `numpy`, `pandas`, `python-dateutil`, `scikit-learn`), so many pipelines
-  install nothing at all. A pipeline's own layer takes precedence over the
+  `numpy`, `pandas`, `python-dateutil`, `scikit-learn`, plus the
+  `clickhouse-connect` and `google-cloud-bigquery`/`db-dtypes` clients), so
+  many pipelines install nothing at all. A pipeline's own layer takes precedence over the
   baked packages (it's ahead on `PYTHONPATH`).
 - The cache is pruned (LRU) back under `WORKER_DEPS_CACHE_MAX_GB` after builds.
 
