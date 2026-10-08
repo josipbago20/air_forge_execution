@@ -21,8 +21,8 @@ FROM python:3.11-slim
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install -r requirements.txt \
+COPY requirements.txt deploy/requirements-onprem.txt ./
+RUN pip install -r requirements.txt -r requirements-onprem.txt \
     && groupadd --system --gid 10001 airforge \
     && useradd --system --uid 10001 --gid airforge --home-dir /app --shell /usr/sbin/nologin airforge
 COPY main.py ./

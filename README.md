@@ -85,6 +85,7 @@ WORKER_SANDBOX=false \
 | `WORKER_METRICS_SAMPLE_INTERVAL_SECONDS` | `0.5` | Minimum gap between samples; the run loop ticks every 0.7 s, so that is the effective cadence (stretches on long runs). |
 | `WORKER_METRICS_MAX_SAMPLES` | `3600` | Soft cap on samples per run. |
 | `WORKER_DEPS_CACHE_DIR` | `/var/lib/airforge/deps` | Cached `requirements.txt` layers, one per hash. |
+| `WORKER_PROMETHEUS_PORT` | `0` (off) | On-prem only: Prometheus metrics of the pool on this port — processes alive, target size, crashed processes (`airforge_worker/prometheus_exporter.py`). Needs `deploy/requirements-onprem.txt` (installed by `deploy/worker.Dockerfile` only). Not to be confused with `WORKER_METRICS` (per-run resource sampling). Checked by `scripts/verify_prometheus.py`. |
 
 The full sandbox/deploy knobs live in [`deploy/worker.env.example`](deploy/worker.env.example).
 

@@ -38,6 +38,7 @@ class Supervisor:
         self._stopping = False
         self._last_nonempty_queue = time.monotonic()
         self._stats_client: BackendClient | None = None
+        self._exporter = None  # PoolExporter when WORKER_PROMETHEUS_PORT is set
 
     # ── Pool primitives ───────────────────────────────────────────────────────
     def _spawn(self) -> None:
@@ -71,6 +72,8 @@ class Supervisor:
                     logger.warning(
                         "Worker w%d died (exit %s) — replacing it", slot, exit_code
                     )
+                    if self._exporter is not None:
+                        self._exporter.crashed()
                     self._spawn()
 
     # ── Autoscaling ───────────────────────────────────────────────────────────
@@ -119,6 +122,10 @@ class Supervisor:
             )
             return
         sandbox.cleanup_stale(cfg)
+        if cfg.prometheus_port > 0:
+            from airforge_worker.prometheus_exporter import PoolExporter
+
+            self._exporter = PoolExporter(cfg.prometheus_port)
 
         initial = cfg.pool_size if not cfg.autoscale else max(cfg.min_workers, cfg.pool_size)
         logger.info(
@@ -150,8 +157,12 @@ class Supervisor:
         signal.signal(signal.SIGINT, handle_stop)
 
         last_scale_check = 0.0
+        target = initial
         while True:
             self._reap_and_restart()
+            if self._exporter is not None:
+                alive = sum(1 for proc in self._procs.values() if proc.is_alive())
+                self._exporter.observe(alive, 0 if self._stopping else target)
 
             if self._stopping:
                 if not self._procs:
@@ -163,6 +174,7 @@ class Supervisor:
             if now - last_scale_check >= cfg.autoscale_interval_seconds:
                 last_scale_check = now
                 desired = self._desired_size()
+                target = desired
                 current = len(self._procs)
                 if desired > current:
                     for _ in range(desired - current):

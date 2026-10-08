@@ -1,0 +1,6 @@
+# What only the on-prem worker image needs, on top of requirements.txt. Cloud
+# workers never install this file.
+#
+# Pool metrics on WORKER_PROMETHEUS_PORT (airforge_worker/prometheus_exporter.py);
+# imported only when it is set.
+prometheus-client==0.26.0

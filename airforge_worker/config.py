@@ -84,6 +84,9 @@ class Config:
     # flush interval), so that is the effective cadence at the default.
     # Soft cap per run; past it the sampling interval stretches.
     metrics_max_samples: int = 3600
+    # Prometheus metrics of the pool on this port (on-prem; needs
+    # deploy/requirements-onprem.txt). 0 starts no listener.
+    prometheus_port: int = 0
 
     # ── Sandboxing (untrusted user code) ───────────────────────────────────────
     # Runs execute inside a gVisor-isolated container by default: fail closed so
@@ -166,6 +169,7 @@ def load_config() -> Config:
             "WORKER_METRICS_SAMPLE_INTERVAL_SECONDS", Config.metrics_sample_interval_seconds
         ),
         metrics_max_samples=_int("WORKER_METRICS_MAX_SAMPLES", Config.metrics_max_samples),
+        prometheus_port=_int("WORKER_PROMETHEUS_PORT", Config.prometheus_port),
         sandbox=_bool("WORKER_SANDBOX", Config.sandbox),
         container_cmd=os.environ.get("WORKER_CONTAINER_CMD", Config.container_cmd),
         container_runtime=os.environ.get(
