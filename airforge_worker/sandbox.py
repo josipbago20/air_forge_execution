@@ -35,6 +35,7 @@ logger = logging.getLogger("airforge.sandbox")
 LogSink = Callable[[str], None]
 
 _RUN_NAME_PREFIX = "airforge-run-"
+_INSTANCE_LABEL = "airforge.instance"
 
 # Container-internal mount points. User code sees an ordinary project at /work
 # with its dependencies importable from /deps.
@@ -149,6 +150,7 @@ def _build_layer(
         "--rm",
         *_runtime_flag(config),
         *_cgroup_parent_flag(config),
+        *_label_flag(config),
         "--network",
         config.container_network,  # PyPI must be reachable
         "--memory",
@@ -207,6 +209,14 @@ def _build_layer(
 
 
 # ── Running a job ─────────────────────────────────────────────────────────────
+def _label_flag(config: Config) -> list[str]:
+    """``--label airforge.instance=<id>`` when the worker has an instance id, so
+    its containers can be told apart from another install's on the same engine."""
+    if not config.instance_id:
+        return []
+    return ["--label", f"{_INSTANCE_LABEL}={config.instance_id}"]
+
+
 def run_argv(
     config: Config,
     *,
@@ -233,6 +243,7 @@ def run_argv(
         name,
         *_runtime_flag(config),
         *_cgroup_parent_flag(config),
+        *_label_flag(config),
         "--network",
         config.container_network,
         "--memory",
@@ -293,7 +304,20 @@ def cleanup_stale(config: Config) -> None:
         return
     try:
         out = subprocess.run(
-            [config.container_cmd, "ps", "-aq", "--filter", f"name={_RUN_NAME_PREFIX}"],
+            [
+                config.container_cmd,
+                "ps",
+                "-aq",
+                "--filter",
+                f"name={_RUN_NAME_PREFIX}",
+                # With an instance id, only this install's orphans: another
+                # worker on the same engine keeps its running containers.
+                *(
+                    ["--filter", f"label={_INSTANCE_LABEL}={config.instance_id}"]
+                    if config.instance_id
+                    else []
+                ),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,

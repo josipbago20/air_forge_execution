@@ -107,6 +107,16 @@ class Config:
     # Container network for runs. "bridge" gives user code full internet egress
     # (playground pipelines call public APIs); "none" would cut it off.
     container_network: str = "bridge"
+    # Where run containers reach the backend's /runtime API (AIRFORGE_API_URL
+    # inside a run). Empty ⇒ backend_url, which is right on a droplet. When the
+    # worker itself runs in a container (on-prem Compose), runs sit on their own
+    # network and need the API's address *there* (e.g. http://api:8000).
+    run_api_url: str = ""
+    # Labels every run and build container with airforge.instance=<this>, and
+    # scopes the startup orphan cleanup to that label. Empty ⇒ unlabelled, and
+    # cleanup removes every airforge-run-* container on the engine (one worker
+    # host per engine, as on the droplets).
+    instance_id: str = ""
     # Optional parent cgroup (a systemd slice, e.g. "airforge-jobs.slice") that
     # every job and build container is placed under. The per-run caps above bound
     # a single run; this slice's own MemoryMax/CPUQuota bound the *sum*, so the
@@ -168,6 +178,8 @@ def load_config() -> Config:
         container_network=os.environ.get(
             "WORKER_CONTAINER_NETWORK", Config.container_network
         ),
+        run_api_url=os.environ.get("WORKER_RUN_API_URL", Config.run_api_url).strip().rstrip("/"),
+        instance_id=os.environ.get("WORKER_INSTANCE_ID", Config.instance_id).strip(),
         container_cgroup_parent=os.environ.get(
             "WORKER_CONTAINER_CGROUP_PARENT", Config.container_cgroup_parent
         ),

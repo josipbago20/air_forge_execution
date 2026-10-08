@@ -251,7 +251,7 @@ def _job_env(
     )
     if run.get("runtime_token"):
         env["AIRFORGE_RUN_TOKEN"] = str(run["runtime_token"])
-        env["AIRFORGE_API_URL"] = config.backend_url
+        env["AIRFORGE_API_URL"] = config.run_api_url or config.backend_url
     return env
 
 
@@ -274,7 +274,7 @@ def _container_env(config: Config, run: dict[str, Any], deps_site: Path | None) 
     # reachable from inside the container — see deploy/DEPLOY.md.
     if run.get("runtime_token"):
         env["AIRFORGE_RUN_TOKEN"] = str(run["runtime_token"])
-        env["AIRFORGE_API_URL"] = config.backend_url
+        env["AIRFORGE_API_URL"] = config.run_api_url or config.backend_url
     if deps_site is not None:
         env["PYTHONPATH"] = "/deps"
     return env

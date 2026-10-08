@@ -1,0 +1,9 @@
+.git
+.venv
+.idea
+.claude
+.env
+.env.*
+deploy/user-data.sh
+**/__pycache__
+**/*.pyc
