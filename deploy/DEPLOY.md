@@ -154,7 +154,8 @@ rides along in the claim bundle automatically (no backend change).
   hash cheap when it overlaps existing layers.
 - The base image **pre-bakes** a modest common stack (`requests`, `httpx`,
   `numpy`, `pandas`, `python-dateutil`, `scikit-learn`, plus the
-  `clickhouse-connect` and `google-cloud-bigquery`/`db-dtypes` clients), so
+  `clickhouse-connect` and `google-cloud-bigquery`/`db-dtypes` clients, and
+  `confluent-kafka` for code using its project's streaming credentials), so
   many pipelines install nothing at all. A pipeline's own layer takes precedence over the
   baked packages (it's ahead on `PYTHONPATH`).
 - The cache is pruned (LRU) back under `WORKER_DEPS_CACHE_MAX_GB` after builds.

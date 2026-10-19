@@ -22,6 +22,9 @@ RUN pip install --no-cache-dir uv
 # ``to_dataframe()`` needs) are there for pipelines that bring their own
 # client: ``af.get_connection`` for ClickHouse, ``af.bigquery_client`` for
 # BigQuery (a client on a short-lived token the backend mints).
+# confluent-kafka is the Kafka client for pipelines that consume or produce
+# with their project's own credentials (``af.kafka_config``, AirForge
+# streaming); manylinux wheels bundle librdkafka.
 RUN uv pip install --system --no-cache \
         requests \
         httpx \
@@ -31,7 +34,8 @@ RUN uv pip install --system --no-cache \
         scikit-learn \
         clickhouse-connect \
         google-cloud-bigquery \
-        db-dtypes
+        db-dtypes \
+        confluent-kafka==2.16.0
 
 # The worker supplies the exact command and --user per run; no entrypoint here.
 CMD ["python3"]
